@@ -319,3 +319,320 @@ To extract more info:
 ![SQL injection low - union](screenshots/sqli-low-union.png)
 
 **Why it worked:** The PHP code directly concatenates user input into the SQL query. No prepared statements and no input validation whatsoever.
+
+#### Security Level: Medium
+
+**Payload:**
+
+```bash
+curl -X POST http://127.0.0.1:8080/vulnerabilities/sqli/ \
+  -b "PHPSESSID=abc123; security=medium" \
+  -d "id=0 UNION SELECT first_name, password FROM users&Submit=Submit"
+```
+
+**Result:** All usernames and hashed passwords dumped.
+
+
+**Why it worked:** Nothing stops us from sending any value in the POST body via curl.
+
+#### Security Level: High
+
+**Payload:** In the input I entered:
+
+```
+0' UNION SELECT first_name, password FROM users #
+```
+
+**Result:** All usernames and hashed passwords shown on the main page.
+
+![SQL injection high](screenshots/sqli-high.png)
+
+**Why it worked:** The input goes through a session variable but there's still no sanitization on it. The `#` comments out the rest of the query including any `LIMIT` clause.
+
+---
+
+### 8. SQL Injection (Blind)
+
+#### Security Level: Low
+
+**Payload:** Boolean-based blind injection. The page just says whether a user ID exists or not, no data is returned directly. I used:
+
+```
+1' AND 1=1 #
+```
+→ "User ID exists in the database." (TRUE)
+
+```
+1' AND 1=2 #
+```
+→ "User ID is MISSING from the database." (FALSE)
+
+**Result:** Confirmed blind injection works. The TRUE/FALSE responses leak the query result. 
+
+![SQL blind injection low](screenshots/sqli-blind-low.png)
+
+**Why it worked:** Same root cause as regular SQL, input goes straight into the query. The difference is the app only shows a binary yes/no rather than actual data, so we have to infer results from the response.
+
+#### Security Level: Medium
+
+**Payload:**
+
+```bash
+curl -X POST http://127.0.0.1:8080/vulnerabilities/sqli_blind/ \
+  -b "PHPSESSID=abc123; security=medium" \
+  -d "id=1 AND 1=1#&Submit=Submit"
+```
+
+And then with `1 AND 1=2` to get the FALSE result.
+
+**Result:** Boolean based blind injection confirmed via POST.
+
+
+**Why it worked:** Same reason as SQL Injection Medium.
+
+#### Security Level: High
+
+**Payload:** Input is submitted via cookie at high level. I used browser DevTools to set the `id` cookie:
+
+```
+1' AND 1=1 #
+1' AND 1=2 #
+```
+
+**Result:** Boolean responses returned as expected. Blind injection still works.
+
+![SQL blind injection high](screenshots/sqli-blind-high.png)
+
+**Why it worked:** Moving the input to a cookie makes automated tools like sqlmap slightly harder to run against it, but the actual query is still vulnerable. There's no validation on what the id cookie contains — it's passed directly into the SQL query the same way.
+
+---
+
+### 9. Weak Session IDs
+
+#### Security Level: Low
+
+**Method:** Clicked "Generate" several times and watched the `dvwaSession` cookie in browser DevTools (Application → Cookies).
+
+**Generation method:** Simple incrementing integer starting from 0.
+Values: `dvwaSession=1`, `dvwaSession=2`, `dvwaSession=3`...
+
+![Weak session ID low](screenshots/session-low.png)
+
+**Why it's weak:** Completely predictable. Anyone who generates one session ID can guess every other active session on the server.
+
+#### Security Level: Medium
+
+**Method:** Same observation, generating the cookie and checking the value.
+
+**Generation method:** Unix timestamp at the time the session is generated.
+Values look like: `dvwaSession=1741420800`
+
+![Weak session ID medium](screenshots/session-medium.png)
+
+**Why it's weak:** Timestamps are predictable if you know approximately when a user logged in. An attacker can brute force a time window to find active sessions.
+
+#### Security Level: High
+
+**Method:** Same observation.
+
+**Generation method:** An incrementing counter hashed with MD5 (no salt).
+Values look like: `dvwaSession=c4ca4238a0b923820dcc509a6f75849b`
+
+![Weak session ID high](screenshots/session-high.png)
+
+---
+
+### 10. XSS (DOM-Based)
+
+#### Security Level: Low
+
+**Payload:**
+
+```
+http://localhost:8080/vulnerabilities/xss_d/?default="></ select><img src=1 onerror=alert(document.cookie)>
+```
+
+**Result:** Cookie values displayed in an alert box.
+
+![XSS DOM low](screenshots/xss-dom-low.png)
+
+**Why it worked:** The `default` URL parameter is read by client side JavaScript and written directly into the page's DOM with no encoding. Whatever we put in the parameter gets inserted as raw HTML and executed.
+
+#### Security Level: Medium
+
+**Payload:** Same URL as low:
+
+```
+http://localhost:8080/vulnerabilities/xss_d/?default="></ select><img src=1 onerror=alert(document.cookie)>
+```
+
+**Result:** Cookie values in alert. Same result.
+
+![XSS DOM medium](screenshots/xss-dom-medium.png)
+
+**Why it worked:** Medium only filters out `<script>` tags. Using an `<img>` tag with `onerror` executes JavaScript just as well, and the filter doesn't touch event handlers on other HTML elements.
+
+#### Security Level: High
+
+**Payload:**
+
+```
+http://localhost:8080/vulnerabilities/xss_d/?default=English#<script>alert(document.cookie)</script>
+```
+
+**Result:** Cookie values in alert.
+
+![XSS DOM high](screenshots/xss-dom-high.png)
+
+**Why it worked:** High security validates the `default` parameter server side and only allows whitelisted language values. But everything after the `#` is never sent to the server. The client side JavaScript still reads the full URL including the fragment and processes it, so our script tag executes without the server checking it.
+
+---
+
+### 11. XSS (Reflected)
+
+#### Security Level: Low
+
+**Payload:**
+
+```
+<script>alert(document.cookie)</script>
+```
+
+Entered in the name field.
+
+**Result:** Cookie values shown in an alert box.
+
+![XSS reflected low](screenshots/xss-reflected-low.png)
+
+**Why it worked:** The server shows the input back into the HTML response with no sanitization at all.
+
+#### Security Level: Medium
+
+**Payload:**
+
+```html
+<img src=x onerror=alert(document.cookie)>
+```
+
+**Result:** Cookie values in alert.
+
+![XSS reflected medium](screenshots/xss-reflected-medium.png)
+
+**Why it worked:** Medium filters `<script>` tags but nothing else. An image with an error handler works just as well for executing JavaScript. The filter is too narrow.
+
+#### Security Level: High
+
+**Payload:**
+
+```html
+<img src="x" onerror=alert(document.cookie)>
+```
+
+**Result:** Cookie values in alert.
+
+![XSS reflected high](screenshots/xss-reflected-high.png)
+
+**Why it worked:** High uses a regex to block any variation of `<script>` tags but doesn't filter event handler attributes on other elements. Event handlers like `onerror`, `onload`, `onmouseover` on any HTML tag can trigger JavaScript function.
+
+---
+
+### 12. XSS (Stored)
+
+#### Security Level: Low
+
+**Payload:** In the message field of the guestbook:
+
+```html
+<script>alert(document.cookie)</script>
+```
+
+**Result:** Every time anyone visits the guestbook page the alert fires with their cookie values. The script is saved in the database.
+
+![XSS stored low](screenshots/xss-stored-low.png)
+
+**Why it worked:** No sanitization on input. The raw script tag goes into the database and comes straight back out into the HTML.
+
+#### Security Level: Medium
+
+**Payload:**
+
+- **Name:** test
+- **Message:** `<img src=x onerror=alert(document.cookie)>`
+
+**Result:** Stored XSS fires on every page load.
+
+![XSS stored medium](screenshots/xss-stored-medium.png)
+
+**Why it worked:** Medium security filters `<script>` tags in the message field but does not block other HTML elements or event handler attributes. An `<img>` tag with `onerror` executes as well when the image fails to load.
+
+#### Security Level: High
+
+**Method:** Used browser DevTools to inspect the name input field and increase the `maxlength` attribute from `10` to `100`, then submitted:
+
+- **Name:** `<body onload=alert(document.cookie)>`
+- **Message:** anything
+
+**Result:** Stored XSS fires.
+
+![XSS stored high](screenshots/xss-stored-high.png)
+
+**Why it worked:** It enforces the character limit on the name field client side via the HTML `maxlength` attribute but that only exists in the browser. Modifying it in DevTools bypasses the limit instantly. The server doesn't re-validate the length, and event handler attributes on `<body>` aren't caught by the regex that only blocks `<script>` tags.
+
+---
+
+### 13. CSP Bypass
+
+#### Security Level: Low
+
+**Method:** First checked the CSP header in DevTools → Network → Response Headers. The policy allows `script-src 'self'`, meaning scripts hosted on the same server are allowed. I created a `csp.js` file locally:
+
+```javascript
+alert("CSP Bypass Successful")
+```
+
+Then used the File Upload module to upload `csp.js` to the server. Once uploaded, I went to the CSP Bypass page and entered the URL to the uploaded file in the input box:
+
+```
+http://localhost:8080/hackable/uploads/csp.js
+```
+
+**Result:** Script executed — alert fired in the browser.
+
+![CSP bypass low](screenshots/csp-low.png)
+
+**Why it worked:** The CSP allows scripts from `'self'` (same origin). Since I could upload a `.js` file to the server through the File Upload vulnerability, I hosted my own script on the same origin. The CSP then allowed it to run.
+
+#### Security Level: Medium
+
+**Payload:** The CSP now uses a nonce-based policy, but the nonce is hardcoded in the page source which means it never changes between requests:
+
+```
+Content-Security-Policy: script-src 'nonce-TmV2ZXIgZ29pbmcgdG8gZ2l2ZSB5b3UgdXA='
+```
+
+I read the nonce from the page HTML and included it in an injected script tag:
+
+```html
+<script nonce="TmV2ZXIgZ29pbmcgdG8gZ2l2ZSB5b3UgdXA=">alert(document.cookie)</script>
+```
+
+**Result:** Script executed.
+
+
+**Why it worked:** A nonce is a one time random value that changes with every page load. If it's static and hardcoded, any attacker can read it from the source and reuse it indefinitely in their injected scripts.
+
+#### Security Level: High
+
+**Payload:** Opened browser DevTools → Network tab, clicked Submit to trigger a request to `jsonp.php?callback=solveSum`. Opened that endpoint directly in a new tab and changed the `callback` parameter:
+
+```
+http://localhost:8080/vulnerabilities/csp/source/jsonp.php?callback=alert(document.cookie)//
+```
+
+**Result:** JavaScript executed through the JSONP endpoint.
+
+![CSP bypass high](screenshots/csp-high.png)
+
+**Why it worked:** The JSONP endpoint is on the same origin as DVWA, so it's whitelisted by the CSP. But it adds the `callback` parameter directly into the response body as JavaScript (e.g., `alert(document.cookie)//({"key":"value"})`). By controlling the callback value we can control the JavaScript that gets executed.
+
+---
