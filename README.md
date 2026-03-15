@@ -636,3 +636,202 @@ http://localhost:8080/vulnerabilities/csp/source/jsonp.php?callback=alert(docume
 **Why it worked:** The JSONP endpoint is on the same origin as DVWA, so it's whitelisted by the CSP. But it adds the `callback` parameter directly into the response body as JavaScript (e.g., `alert(document.cookie)//({"key":"value"})`). By controlling the callback value we can control the JavaScript that gets executed.
 
 ---
+
+
+### 14. JavaScript Attacks
+
+#### Security Level: Low
+
+**Method:** Opened browser DevTools → Console and called the token generation function directly:
+
+```javascript
+generate_token()
+```
+
+Then typed "success" in the phrase field and clicked Submit.
+
+**Result:** "Well done!" success page.
+
+![JavaScript low](screenshots/js-low.png)
+
+**Why it worked:** The token generation function is exposed in the page's JavaScript. Calling it from the browser console produces a valid token that the server accepts. There's no server side logic and everything is in the client.
+
+#### Security Level: Medium
+
+**Method:** Opened browser DevTools → Console and called the internal token function:
+
+```javascript
+do_elsesomething("XX")
+```
+
+Then typed "success" and submitted.
+
+**Result:** Token set to the expected value, form submitted successfully.
+
+![JavaScript medium](screenshots/js-medium.png)
+
+**Why it worked:** The token function was moved to a separate file to make it less obvious, but it's still readable JavaScript downloaded by the browser.
+
+#### Security Level: High
+
+**Method:** Reverse engineered the token generation algorithm from the JavaScript source:
+1. Start with the phrase `success`
+2. Prepend `XX` → `XXsuccess`
+3. SHA256 hash the result
+4. Append `ZZ` → `{hash}ZZ`
+5. SHA256 hash again → final token
+
+**Final token:**
+```
+ec7ef8687050b6fe803867ea696734c67b541dfafb286a0b1239f42ac5b0aa84
+```
+
+Sent it via curl:
+
+```bash
+curl -X POST "http://localhost:8080/vulnerabilities/javascript/" \
+  -d "token=ec7ef8687050b6fe803867ea696734c67b541dfafb286a0b1239f42ac5b0aa84&phrase=success&send=Submit" \
+  -H "Cookie: PHPSESSID=t8dk40rt0k1bel64n4unshv6i7; security=high"
+```
+
+**Result:** Server accepted the manually computed token.
+
+![JavaScript high](screenshots/js-high.png)
+
+**Why it worked:** The code still runs in the browser and can be deobfuscated stepped through in DevTools, or reverse engineered. Once the algorithm is understood it's important
+ to compute the correct token for any input.
+
+---
+
+## Docker Inspection Tasks
+
+### `docker ps`
+
+```bash
+docker ps
+```
+
+This shows the DVWA container is running, mapped to port 8080 on the host.
+
+![docker ps output](screenshots/docker-ps-full.png)
+
+### `docker inspect dvwa`
+
+```bash
+docker inspect dvwa
+```
+
+Key parts of the output (trimmed for readability):
+
+![docker inspect output](screenshots/docker-inspect.png)
+
+### `docker logs dvwa`
+
+```bash
+docker logs dvwa
+```
+
+Shows Apache startup logs:
+
+![docker logs output](screenshots/docker-logs.png)
+
+### `docker exec` — Inside the Container
+
+```bash
+docker exec -it dvwa /bin/bash
+```
+
+Once inside:
+
+```bash
+ls /var/www/html
+```
+
+![Container file listing](screenshots/docker-exec-ls.png)
+
+---
+
+## Security Analysis
+
+### Why does SQL Injection succeed at Low security?
+
+At the Low security level, user input is placed directly into the SQL query string without any form of sanitization, or escaping. The PHP code does:
+
+```php
+$id = $_REQUEST['id'];
+$query = "SELECT first_name, last_name FROM users WHERE user_id = '$id'";
+```
+
+An attacker can terminate the string with a single quote and inject arbitrary SQL. There are no input validation.
+
+### What control prevents it at High?
+
+At the High level, the following controls are added:
+- Input is submitted through a separate popup window and stored in a PHP session variable (makes automated tools harder to use)
+- `LIMIT 1` is appended to the query to restrict output
+- The result page is separate from the input, complicating exploitation.
+
+### Does HTTPS prevent these attacks? Why or why not?
+
+**No, HTTPS does not prevent any of these attacks.**
+
+HTTPS (TLS/SSL) provides encryption of data and authentication of the server.
+
+But all the vulnerabilities tested here (SQLi, XSS, CSRF, Command Injection, etc.) are application-layer flaws. They happen inside the encrypted tunnel. HTTPS protects the communication channel, not the application logic.
+
+
+### What risks exist if this application is deployed publicly?
+
+If DVWA were exposed to the public internet:
+
+1. **Full database compromise:** SQL injection allows extracting all user credentials, which are hashed with MD5 (easily crackable)
+2. **Remote Code Execution:** Command injection and unrestricted file upload allow arbitrary command execution on the server
+3. **Server takeover:** Once an attacker has RCE, they can install backdoors, malware, or use the server for cryptocurrency mining
+4. **Data theft:** File inclusion allows reading any file on the server, including configuration files with database passwords
+5. **User attacks:** XSS vulnerabilities could be used to steal session cookies from other users and perform actions on their behalf
+
+This is why the assignment explicitly states: **do NOT expose DVWA to the public internet.**
+
+### OWASP Top 10 Mapping
+
+| Vulnerability | OWASP Top 10 (2021) Category |
+|---|---|
+| Brute Force | A07: Identification and Authentication Failures |
+| Command Injection | A03: Injection |
+| CSRF | A01: Broken Access Control |
+| File Inclusion | A01: Broken Access Control / A05: Security Misconfiguration |
+| File Upload | A04: Insecure Design |
+| Insecure CAPTCHA | A07: Identification and Authentication Failures |
+| SQL Injection | A03: Injection |
+| SQL Injection (Blind) | A03: Injection |
+| Weak Session IDs | A07: Identification and Authentication Failures |
+| XSS (DOM) | A03: Injection |
+| XSS (Reflected) | A03: Injection |
+| XSS (Stored) | A03: Injection |
+| CSP Bypass | A05: Security Misconfiguration |
+| JavaScript Attacks | A04: Insecure Design |
+
+---
+
+### HTTP vs HTTPS Traffic
+
+
+**HTTP traffic (port 8080):**
+- All data visible in plaintext
+
+**HTTPS traffic (port 443):**
+- All data encrypted with TLS
+
+### Key Differences
+
+| Aspect | HTTP | HTTPS |
+|---|---|---|
+| Encryption | None, plaintext | TLS encryption |
+| Credential visibility | Visible to hackers | Encrypted |
+| Certificate required | No | Yes (self-signed or CA-signed) |
+| Performance | Slightly faster | Minor overhead from TLS handshake |
+| Application layer attacks | Still vulnerable | **Still vulnerable** |
+
+HTTPS protects data in transit but does NOT fix the application vulnerabilities we tested. SQLi, XSS, CSRF, command injection, etc. all work the same way over HTTPS.
+
+---
